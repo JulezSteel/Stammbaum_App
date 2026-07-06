@@ -92,38 +92,85 @@ export interface DuplicateSuggestion {
   reason: string;
 }
 
-/** Suggest likely duplicates among canonical persons (same name, compatible dates). */
+/** Levenshtein edit distance between two strings. */
+function levenshtein(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = Array.from({ length: n + 1 }, (_, i) => i);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/** Fuzzy name equality that tolerates OCR/spelling variants (Corsilius↔Corzilius). */
+function nameSimilar(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const maxLen = Math.max(a.length, b.length);
+  const d = levenshtein(a, b);
+  if (maxLen >= 8) return d <= 2;
+  if (maxLen >= 5) return d <= 1;
+  return false;
+}
+
+/** Normalized, deduped surnames of a person (family name + maiden name). */
+function surnames(p: Person): string[] {
+  return [...new Set([p.last_name, p.birth_name].map((s) => normalize(s || "")).filter(Boolean))];
+}
+
+/** Suggest likely duplicates among canonical persons (fuzzy name + compatible dates). */
 export function findDuplicates(persons: Person[]): DuplicateSuggestion[] {
-  const suggestions: DuplicateSuggestion[] = [];
+  const scored: (DuplicateSuggestion & { score: number })[] = [];
   for (let i = 0; i < persons.length; i++) {
     for (let j = i + 1; j < persons.length; j++) {
       const a = persons[i];
       const b = persons[j];
-      const lastA = normalize(a.last_name || a.birth_name || "");
-      const lastB = normalize(b.last_name || b.birth_name || "");
-      const birthNameMatch =
-        (a.birth_name && normalize(a.birth_name) === lastB) ||
-        (b.birth_name && normalize(b.birth_name) === lastA);
-      if (!lastA || (lastA !== lastB && !birthNameMatch)) continue;
 
-      const firstA = a.first_names.map(normalize);
-      const firstB = b.first_names.map(normalize);
+      const surA = surnames(a);
+      const surB = surnames(b);
+      if (!surA.length || !surB.length) continue;
+      // A shared surname OR shared maiden name (fuzzy) is required.
+      const exactSurname = surA.some((s) => surB.includes(s));
+      const surnameMatch = surA.some((sa) => surB.some((sb) => nameSimilar(sa, sb)));
+      if (!surnameMatch) continue;
+
+      const firstA = a.first_names.map(normalize).filter(Boolean);
+      const firstB = b.first_names.map(normalize).filter(Boolean);
       if (!firstA.length || !firstB.length) continue;
-      const sharedFirst = firstA.some((f) => firstB.includes(f));
+      const sharedFirst = firstA.some((fa) => firstB.some((fb) => nameSimilar(fa, fb)));
       if (!sharedFirst) continue;
 
       const yA = yearOf(a.birth_date);
       const yB = yearOf(b.birth_date);
       if (yA !== null && yB !== null && Math.abs(yA - yB) > 2) continue;
 
-      const reason =
-        yA !== null && yB !== null
-          ? `Gleicher Name, Geburtsjahr ${yA}/${yB}`
-          : "Gleicher Name" + (birthNameMatch ? " (Geburtsname)" : "");
-      suggestions.push({ a, b, reason });
+      // Same maiden name is the strongest single signal.
+      const maidenMatch =
+        !!a.birth_name && !!b.birth_name &&
+        nameSimilar(normalize(a.birth_name), normalize(b.birth_name));
+
+      let score = 0;
+      if (exactSurname) score += 2;
+      if (maidenMatch) score += 3;
+      if (yA !== null && yB !== null && yA === yB) score += 2;
+      if (yA !== null && yB !== null && Math.abs(yA - yB) <= 2) score += 1;
+
+      const bits: string[] = [exactSurname ? "gleicher Name" : "ähnlicher Name"];
+      if (maidenMatch) bits.push("gleicher Geburtsname");
+      if (yA !== null && yB !== null) bits.push(`Geburtsjahr ${yA}/${yB}`);
+
+      scored.push({ a, b, reason: bits.join(", "), score });
     }
   }
-  return suggestions;
+  // Strongest matches first.
+  return scored.sort((x, y) => y.score - x.score).map(({ a, b, reason }) => ({ a, b, reason }));
 }
 
 /** Merge person b into person a: returns updated merge map. */
