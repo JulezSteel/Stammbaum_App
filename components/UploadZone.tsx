@@ -6,6 +6,8 @@ import type { UploadedDocument, TranscriptionResult } from "@/lib/types";
 interface Props {
   onDocumentAdded: (doc: UploadedDocument, file: File) => void;
   onDocumentUpdated: (id: string, updates: Partial<UploadedDocument>) => void;
+  /** Called when a backup .json is dropped/selected instead of a document. */
+  onBackupFile?: (file: File) => void;
 }
 
 const CONCURRENCY = 2;
@@ -34,7 +36,7 @@ function namespaceIds(result: TranscriptionResult, docId: string): Transcription
   };
 }
 
-export default function UploadZone({ onDocumentAdded, onDocumentUpdated }: Props) {
+export default function UploadZone({ onDocumentAdded, onDocumentUpdated, onBackupFile }: Props) {
   const [isDragging, setIsDragging] = useState(false);
   const [queueInfo, setQueueInfo] = useState({ pending: 0, active: 0 });
   const queueRef = useRef<{ id: string; file: File }[]>([]);
@@ -78,6 +80,14 @@ export default function UploadZone({ onDocumentAdded, onDocumentUpdated }: Props
 
   const processFiles = useCallback(
     (files: File[]) => {
+      // A dropped/selected backup .json restores the workspace instead of being transcribed.
+      const backup = files.find(
+        (f) => f.type === "application/json" || f.name.toLowerCase().endsWith(".json")
+      );
+      if (backup) {
+        onBackupFile?.(backup);
+        return;
+      }
       const accepted = files.filter(
         (f) => f.type.startsWith("image/") || f.type === "application/pdf"
       );
@@ -98,7 +108,7 @@ export default function UploadZone({ onDocumentAdded, onDocumentUpdated }: Props
       }
       pump();
     },
-    [onDocumentAdded, pump]
+    [onDocumentAdded, pump, onBackupFile]
   );
 
   const onDrop = useCallback(
@@ -133,7 +143,7 @@ export default function UploadZone({ onDocumentAdded, onDocumentUpdated }: Props
     >
       <input
         type="file"
-        accept="image/*,application/pdf"
+        accept="image/*,application/pdf,application/json,.json"
         multiple
         onChange={onInputChange}
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
@@ -145,6 +155,9 @@ export default function UploadZone({ onDocumentAdded, onDocumentUpdated }: Props
         </p>
         <p className="text-stone-400 text-sm mt-2">
           JPG, PNG, WEBP, PDF – auch große Stapel möglich, Verarbeitung läuft automatisch
+        </p>
+        <p className="text-stone-300 text-xs mt-1">
+          Eine Sicherungsdatei (.json) hier ablegen stellt sie wieder her
         </p>
         {busy && (
           <p className="text-amber-700 text-sm mt-3 font-medium">

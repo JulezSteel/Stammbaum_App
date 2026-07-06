@@ -4,6 +4,62 @@ import type { TranscriptionResult } from "@/lib/types";
 
 export const maxDuration = 60;
 
+/** Pull the JSON object out of a model reply that may include a preamble,
+ *  trailing prose, or markdown code fences. */
+function extractJson(text: string): string {
+  let t = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
+  if (start !== -1 && end !== -1 && end > start) {
+    t = t.slice(start, end + 1);
+  }
+  return t;
+}
+
+async function transcribeFile(
+  sourceBlock: object,
+  filename: string
+): Promise<TranscriptionResult> {
+  let lastErr: unknown;
+  // Two attempts: the model occasionally wraps the JSON in prose; a retry with
+  // robust extraction recovers nearly all of those cases.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-6",
+      max_tokens: 16000,
+      system: TRANSCRIPTION_SYSTEM_PROMPT,
+      messages: [
+        {
+          role: "user",
+          content: [
+            sourceBlock as never,
+            {
+              type: "text" as const,
+              text: `Bitte transkribiere dieses historische Dokument vollständig.${
+                filename ? ` Dateiname: ${filename}` : ""
+              } Antworte ausschließlich mit dem JSON-Objekt, ohne Einleitung.`,
+            },
+          ],
+        },
+      ],
+    });
+
+    const textBlock = response.content.find((b) => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") {
+      lastErr = new Error("Keine Textantwort von Claude erhalten");
+      continue;
+    }
+    try {
+      return JSON.parse(extractJson(textBlock.text)) as TranscriptionResult;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw new Error(
+    `Antwort war kein gültiges JSON (${lastErr instanceof Error ? lastErr.message : "unbekannt"})`
+  );
+}
+
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData();
@@ -33,40 +89,11 @@ export async function POST(req: NextRequest) {
             source: { type: "base64" as const, media_type: mediaType, data: base64 },
           };
 
-      const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-6",
-        max_tokens: 8192,
-        system: TRANSCRIPTION_SYSTEM_PROMPT,
-        messages: [
-          {
-            role: "user",
-            content: [
-              sourceBlock,
-              {
-                type: "text" as const,
-                text: `Bitte transkribiere dieses historische Dokument vollständig.${
-                  filename ? ` Dateiname: ${filename}` : ""
-                } Antworte ausschließlich mit dem JSON-Objekt.`,
-              },
-            ],
-          },
-        ],
-      });
-
-      const textBlock = response.content.find((b) => b.type === "text");
-      if (!textBlock || textBlock.type !== "text") {
-        throw new Error("Keine Textantwort von Claude erhalten");
-      }
-
-      let jsonText = textBlock.text.trim();
-      // Strip markdown code fences if present
-      jsonText = jsonText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
-
-      const parsed: TranscriptionResult = JSON.parse(jsonText);
+      const parsed = await transcribeFile(sourceBlock, filename);
 
       // Ensure sources reference the filename
       const sourceRef = file.name || filename || "Hochgeladenes Dokument";
-      parsed.persons = parsed.persons.map((p) => ({
+      parsed.persons = (parsed.persons ?? []).map((p) => ({
         ...p,
         sources: p.sources?.length ? p.sources : [sourceRef],
       }));

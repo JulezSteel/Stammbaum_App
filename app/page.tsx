@@ -8,6 +8,7 @@ import {
   type StoredDocument, type MergeMap,
 } from "@/lib/db";
 import { canonicalPersons, mergePersons } from "@/lib/merge";
+import { restoreBackup } from "@/lib/backup";
 import UploadZone from "@/components/UploadZone";
 import DocumentCard from "@/components/DocumentCard";
 import ExportPanel from "@/components/ExportPanel";
@@ -113,6 +114,31 @@ export default function Home() {
     []
   );
 
+  // A backup .json dropped onto / picked in the upload zone restores the workspace,
+  // rather than being (wrongly) treated as a document to transcribe.
+  const handleBackupFile = useCallback(
+    async (file: File) => {
+      if (
+        documents.length > 0 &&
+        !confirm(
+          "Das ist eine Sicherungsdatei. Wiederherstellen ersetzt ALLE aktuell vorhandenen Dokumente und Personen. Fortfahren?"
+        )
+      ) {
+        return;
+      }
+      try {
+        await restoreBackup(await file.text());
+        window.location.reload();
+      } catch (e) {
+        alert(
+          "Wiederherstellung fehlgeschlagen: " +
+            (e instanceof Error ? e.message : "unbekannter Fehler")
+        );
+      }
+    },
+    [documents.length]
+  );
+
   const removeDocument = useCallback((id: string) => {
     setDocuments((prev) => prev.filter((d) => d.id !== id));
     deleteDocument(id).catch(() => {});
@@ -193,7 +219,11 @@ export default function Home() {
             </p>
           </div>
 
-          <UploadZone onDocumentAdded={addDocument} onDocumentUpdated={updateDocument} />
+          <UploadZone
+            onDocumentAdded={addDocument}
+            onDocumentUpdated={updateDocument}
+            onBackupFile={handleBackupFile}
+          />
 
           {documents.length > 0 && (
             <div className="space-y-4">
